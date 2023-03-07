@@ -16,7 +16,9 @@ class AlertService extends EventEmitter {
 
     if (config.influxCollectors && config.collect && !config.api) {
       // node is a collector: listen for toggleAlerts op
-      socketService.on('toggleAlert', this.toggleAlert.bind(this))
+      socketService.on('toggleAlert', ({ data, questionId }) => {
+        this.toggleAlert(data, questionId)
+      })
     }
 
     if (config.collect) {
@@ -43,29 +45,24 @@ class AlertService extends EventEmitter {
     return Math.floor(n / dec) * dec
   }
 
-  toggleAlert(alert, fromCluster = false) {
+  toggleAlert(alert, messageId) {
     if (alert.market.indexOf(':') !== -1) {
       throw new Error('you are using an outdated client, please refresh')
     }
 
-    if (!fromCluster && config.influxCollectors && socketService.clusteredCollectors.length) {
+    if (!messageId && config.influxCollectors && socketService.clusteredCollectors.length) {
       const collector = socketService.getNodeByMarket(alert.market)
 
       if (!collector) {
         throw new Error(`unsupported market ${alert.market}`)
       }
 
-      collector.write(
-        JSON.stringify({
-          op: 'toggleAlert',
-          data: alert,
-        }) + '#'
-      )
+      return socketService.ask(collector, 'toggleAlert', alert)
     } else {
       const index = getIndex(alert.market)
 
       if (!index) {
-        if (!fromCluster) {
+        if (!messageId) {
           throw new Error(`unsupported market ${alert.market}`)
         }
 
@@ -73,20 +70,33 @@ class AlertService extends EventEmitter {
       }
 
       const activeAlert = this.getActiveAlert(alert, index.id)
+      const priceOffset = index.price && alert.currentPrice ? alert.currentPrice - index.price : 0
 
-      if (activeAlert) {
-        activeAlert.user = alert.user
-
-        if (typeof alert.newPrice === 'number') {
-          this.moveAlert(activeAlert, index.id, alert.newPrice)
-        } else if (alert.unsubscribe) {
-          this.unregisterAlert(activeAlert, index.id)
+      if (!alert.status) {
+        if (activeAlert) {
+          activeAlert.user = alert.user
+  
+          if (typeof alert.newPrice === 'number') {
+            this.moveAlert(activeAlert, index.id, alert.newPrice, priceOffset)
+          } else if (alert.unsubscribe) {
+            this.unregisterAlert(activeAlert, index.id)
+          }
+        } else if (!alert.unsubscribe) {
+          this.registerAlert(alert, index.id, priceOffset)
         }
-
-        return
-      } else if (!alert.unsubscribe) {
-        this.registerAlert(alert, index.id)
       }
+
+      const status = {
+        markets: index.markets,
+        alert: activeAlert,
+        priceOffset
+      }
+
+      if (messageId) {
+        socketService.answer(socketService.clusterSocket, messageId, status)
+      }
+
+      return status
     }
   }
 
@@ -106,7 +116,7 @@ class AlertService extends EventEmitter {
     )
   }
 
-  registerAlert(alert, market) {
+  registerAlert(alert, market, priceOffset) {
     if (!this.alerts[market]) {
       this.alerts[market] = {}
     }
@@ -146,6 +156,7 @@ class AlertService extends EventEmitter {
       endpoint: alert.endpoint,
       market: market,
       price: alert.price,
+      priceCompare: alert.price - (priceOffset || 0),
       origin: alert.origin,
       timestamp: now,
     })
@@ -193,7 +204,7 @@ class AlertService extends EventEmitter {
     return false
   }
 
-  moveAlert(alert, market, newPrice) {
+  moveAlert(alert, market, newPrice, priceOffset) {
     const rangePrice = this.getRangePrice(alert.price)
 
     if (!this.alerts[market][rangePrice]) {
@@ -218,6 +229,7 @@ class AlertService extends EventEmitter {
       })
 
       alert.price = newPrice
+      alert.priceCompare = alert.price - (priceOffset || 0)
       alert.timestamp = now
 
       const newRangePrice = this.getRangePrice(newPrice)
@@ -340,7 +352,6 @@ class AlertService extends EventEmitter {
     console.log(`[alert/persist] save ${Object.keys(this.alertEndpoints).length} alert user(s)`)
 
     try {
-      console.log('')
       await persistenceService.set('alerts-endpoints', this.alertEndpoints)
     } catch (error) {
       console.error('[alert/persist] persistence error (saving endpoints)', error.message)
@@ -383,7 +394,7 @@ class AlertService extends EventEmitter {
     }
   }
 
-  sendAlert(alert, market, elapsedTime) {
+  sendAlert(alert, market, elapsedTime, direction) {
     if (!this.alertEndpoints[alert.endpoint]) {
       console.error(`[alert/send] attempted to send alert without matching endpoint`, alert)
       return
@@ -401,6 +412,7 @@ class AlertService extends EventEmitter {
       origin: alert.origin,
       price: alert.price,
       market: market,
+      direction
     })
 
     this.emit('change', {
@@ -433,27 +445,21 @@ class AlertService extends EventEmitter {
    * @param {number} high index high range
    * @param {number} low index low range
    */
-  checkPriceCrossover(market, high, low) {
+  checkPriceCrossover(market, high, low, direction) {
     const rangePriceHigh = this.getRangePrice(high)
     const rangePriceLow = this.getRangePrice(low)
 
-    this.checkInRangePriceCrossover(market, high, low, rangePriceLow)
+    this.checkInRangePriceCrossover(market, high, low, direction, rangePriceLow)
 
     if (rangePriceLow !== rangePriceHigh) {
-      this.checkInRangePriceCrossover(market, high, low, rangePriceHigh)
+      this.checkInRangePriceCrossover(market, high, low, direction, rangePriceHigh)
     }
   }
 
-  checkInRangePriceCrossover(market, high, low, rangePrice) {
+  checkInRangePriceCrossover(market, high, low, direction, rangePrice) {
     if (!this.alerts[market] || !this.alerts[market][rangePrice]) {
       return
     }
-
-    // const inRangeLength = this.alerts[market][rangePrice].length
-
-    /*console.log(
-      `[alert] check ${market}'s crossovers in the ${rangePrice} region (${inRangeLength} alert${inRangeLength > 1 ? 's' : ''})`
-    )*/
 
     const now = Date.now()
 
@@ -464,10 +470,10 @@ class AlertService extends EventEmitter {
         continue
       }
 
-      const isTriggered = alert.price <= high && alert.price >= low
+      const isTriggered = alert.priceCompare <= high && alert.priceCompare >= low
 
       if (isTriggered) {
-        this.sendAlert(alert, market, now - alert.timestamp)
+        this.sendAlert(alert, market, now - alert.timestamp, direction)
 
         if (this.unregisterAlert(alert, market, true)) {
           i--

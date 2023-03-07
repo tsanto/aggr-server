@@ -15,7 +15,7 @@ const defaultConfig = {
     'OKEX:BTC-USDT',
     'KRAKEN:XBT/USD',
     'COINBASE:BTC-USD',
-    'POLONIEX:USDT_BTC',
+    'POLONIEX:BTC_USDT',
     'HUOBI:btcusdt',
     'BITSTAMP:btcusd',
     'BITMEX:XBTUSD',
@@ -52,6 +52,9 @@ const defaultConfig = {
     'HUOBI:ETH-USD',
     'BINANCE_FUTURES:ethusd_perp',
   ],
+  
+  // non standard products
+  extraProducts: [],
 
   // will connect to exchanges and subscribe to pairs on startup
   collect: true,
@@ -200,7 +203,7 @@ const defaultConfig = {
   privateVapidKey: null,
   alertExpiresAfter: 1000 * 60 * 60 * 24 * 7,
   alertEndpointExpiresAfter: 1000 * 60 * 60 * 24 * 30,
-  priceIndexesBlacklist: ['HITBTC', 'BITSTAMP', 'KRAKEN', 'POLONIEX'],
+  priceIndexesBlacklist: [],
 
   // verbose
   debug: false,

@@ -1,5 +1,5 @@
 const Exchange = require('../exchange')
-const WebSocket = require('ws')
+const WebSocket = require('websocket').w3cwebsocket
 const axios = require('axios')
 const { getHms } = require('../helper')
 
@@ -296,7 +296,8 @@ class Okex extends Exchange {
           !response.data.data.length ||
           !response.data.data[0]
         ) {
-          throw new Error(response.data ? response.data.msg : 'empty REST /liquidation-order')
+          //throw new Error(response.data ? response.data.msg : 'empty REST /liquidation-order')
+          return
         }
 
         const liquidations = response.data.data[0].details.filter((liquidation) => {

@@ -45,16 +45,18 @@ process.on('SIGINT', async function () {
   }
 
   if (config.collect) {
-    try {
-      await alertService.persistAlerts()
-      console.log(`[exit] saved alerts ✓`)
-    } catch (error) {
-      console.error(`[exit] failed to save alerts`, error.message)
+    if (alertService.enabled) {
+      try {
+        await alertService.persistAlerts()
+        console.log(`[exit] saved alerts ✓`)
+      } catch (error) {
+        console.error(`[exit] failed to save alerts`, error.message)
+      }
     }
     
     if (config.persistConnections) {
       try {
-        await saveConnections()
+        await saveConnections(true)
         console.log(`[exit] saved connections ✓`)
       } catch (error) {
         console.error(`[exit] failed to save connections`, error.message)

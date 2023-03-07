@@ -1,5 +1,5 @@
 const EventEmitter = require('events')
-const WebSocket = require('ws')
+const WebSocket = require('websocket').w3cwebsocket
 const config = require('./config')
 
 const { ID, getHms, sleep, humanReadyState } = require('./helper')
@@ -114,8 +114,12 @@ class Exchange extends EventEmitter {
   /**
    * Get exchange ws url
    */
-  getUrl() {
-    return typeof this.url === 'function' ? this.url.apply(this, arguments) : this.url
+  getUrl(pair) {
+    if (typeof this.url === 'function') {
+      return this.url(pair)
+    }
+
+    return Promise.resolve(this.url)
   }
 
   /**
@@ -132,7 +136,7 @@ class Exchange extends EventEmitter {
 
     console.debug(`[${this.id}.link] connecting ${pair}`)
 
-    const api = this.resolveApi(pair)
+    const api = await this.resolveApi(pair)
 
     if (returnConnectedEvent) {
       let promiseOfApiOpen
@@ -169,11 +173,12 @@ class Exchange extends EventEmitter {
     }
   }
 
-  resolveApi(pair) {
-    let api = this.getActiveApiByUrl(this.getUrl(pair))
+  async resolveApi(pair) {
+    const url = await this.getUrl(pair)
+    let api = this.getActiveApiByUrl(url)
 
     if (!api) {
-      api = this.createWs(pair)
+      api = this.createWs(url, pair)
     } else {
       console.debug(`[${this.id}.resolveApi] use existing api (api is ${humanReadyState(api.readyState)})`)
     }
@@ -203,9 +208,7 @@ class Exchange extends EventEmitter {
     return api
   }
 
-  createWs(pair) {
-    const url = this.getUrl(pair)
-
+  createWs(url, pair) {
     const api = new WebSocket(url)
     api.id = ID()
 
@@ -417,8 +420,21 @@ class Exchange extends EventEmitter {
 
     const pairsToReconnect = [...api._pending, ...api._connected]
 
+    const affectedConnections = {}
+
+    for (const pair of pairsToReconnect) {
+      const key = this.id + ':' + pair
+      const connection = connections[key]
+
+      if (connection) {
+        affectedConnections[key] = connection
+      }
+    }
+
+    dumpConnections(affectedConnections)
+
     this.promisesOfApiReconnections[api.id] = this.reconnectPairs(pairsToReconnect).then(() => {
-      console.debug(`[${this.id}.reconnectApi] done reconnecting api (was ${api.id}${reason ? ' because of ' + reason : ''})`)
+      console.log(`[${this.id}.reconnectApi] done reconnecting api (was ${api.id}${reason ? ' because of ' + reason : ''})`)
       delete this.promisesOfApiReconnections[api.id]
     })
 
@@ -536,26 +552,13 @@ class Exchange extends EventEmitter {
       if (this.queuedTrades.length) {
         const sortedQueuedTrades = this.queuedTrades.sort((a, b) => a.timestamp - b.timestamp)
 
-        /*console.log('emit trades (recovered + received while recevering)')
-        sortedQueuedTrades.forEach((trade, index, array) => {
-          if (trade.timestamp >= fromTime && (!index || array[index - 1].timestamp < fromTime)) {
-            console.log('-- start of recovered trades')
-          }
-          console.log(new Date(trade.timestamp).toISOString(), +trade.size)
-          if (trade.timestamp < toTime && (index === array.length - 1 || array[index + 1].timestamp >= toTime)) {
-            console.log('-- end of recovered trades')
-          }
-        })*/
-
         console.log(
           `[${this.id}] release trades queue (${sortedQueuedTrades.length} trades, ${new Date(
             +sortedQueuedTrades[0].timestamp
-          ).toISOString()} to ${new Date(+sortedQueuedTrades[sortedQueuedTrades.length - 1].timestamp).toISOString()})`
+          ).toISOString().split('T').pop()} to ${new Date(+sortedQueuedTrades[sortedQueuedTrades.length - 1].timestamp).toISOString().split('T').pop()})`
         )
         this.emit('trades', sortedQueuedTrades)
         this.queuedTrades = []
-
-        dumpConnections()
       }
     } else {
       return this.waitBeforeContinueRecovery().then(() => this.recoverNextRange(true))
@@ -745,6 +748,8 @@ class Exchange extends EventEmitter {
       return
     }
 
+    api._closeWasHandled = true
+
     if (this.connecting[api.id]) {
       this.failedConnections++
       const delay = 1000 * this.failedConnections
@@ -761,11 +766,9 @@ class Exchange extends EventEmitter {
 
     const pairs = [...api._pending, ...api._connected]
 
-    console.debug(`[${this.id}] ${pairs.join(',')}'s api closed`)
+    console.log(`[${this.id}] ${pairs.join(',')}'s api closed`)
 
     this.emit('close', api.id, pairs, event)
-
-    api._closeWasHandled = true
   }
 
   /**
@@ -869,7 +872,7 @@ class Exchange extends EventEmitter {
 
     this.keepAliveIntervals[api.id] = setInterval(() => {
       if (api.readyState === WebSocket.OPEN) {
-        api.send(JSON.stringify(payload))
+        api.send(typeof payload === 'string' ? payload : JSON.stringify(payload))
       }
     }, every)
   }
